@@ -38,41 +38,145 @@ jobs:
                   return {}
               return json.loads(p.read_text(encoding="utf-8"))
 
-          def top_items(data, limit=10):
+          def item_text(item):
+              title = item.get("title_zh") or item.get("title") or "Untitled"
+              url = item.get("url") or ""
+              source = item.get("source") or item.get("site_name") or "unknown"
+              site = item.get("site_name") or ""
+              label = source if source != site else site
+              return f"[{title}]({url}) - {label}" if url else f"{title} - {label}"
+
+          def contains_any(item, keywords):
+              haystack = " ".join(
+                  str(item.get(k, "") or "")
+                  for k in ("title", "title_zh", "source", "site_name", "url")
+              ).lower()
+              return any(k.lower() in haystack for k in keywords)
+
+          def select_items(data, keywords=None, limit=10, exclude=None):
               rows = []
-              for item in data.get("items", [])[:limit]:
-                  title = item.get("title_zh") or item.get("title") or "Untitled"
-                  url = item.get("url") or ""
-                  source = item.get("source") or item.get("site_name") or "unknown"
-                  if url:
-                      rows.append(f"- [{title}]({url}) - {source}")
-                  else:
-                      rows.append(f"- {title} - {source}")
-              return rows or ["- No items found in the latest snapshot."]
+              seen = set()
+              exclude = exclude or []
+              for item in data.get("items", []):
+                  if keywords and not contains_any(item, keywords):
+                      continue
+                  if exclude and contains_any(item, exclude):
+                      continue
+                  url = item.get("url") or item.get("title") or item.get("title_zh")
+                  if url in seen:
+                      continue
+                  seen.add(url)
+                  rows.append(f"- {item_text(item)}")
+                  if len(rows) >= limit:
+                      break
+              return rows
+
+          def select_domain_items(data, domains, limit=10):
+              rows = []
+              seen = set()
+              for item in data.get("items", []):
+                  url = (item.get("url") or "").lower()
+                  source = (item.get("source") or "").lower()
+                  site = (item.get("site_name") or "").lower()
+                  if not any(domain.lower() in url or domain.lower() in source or domain.lower() in site for domain in domains):
+                      continue
+                  key = item.get("url") or item.get("title") or item.get("title_zh")
+                  if key in seen:
+                      continue
+                  seen.add(key)
+                  rows.append(f"- {item_text(item)}")
+                  if len(rows) >= limit:
+                      break
+              return rows
+
+          def section_items(data, title, keywords=None, limit=8, empty=None, exclude=None):
+              rows = select_items(data, keywords=keywords, limit=limit, exclude=exclude)
+              return [f"## {title}", *(rows or [f"- {empty or '今日没有匹配到足够高信号内容。'}"]), ""]
+
+          def section_domain_items(data, title, domains, limit=8, empty=None):
+              rows = select_domain_items(data, domains=domains, limit=limit)
+              return [f"## {title}", *(rows or [f"- {empty or '今日没有官方/权威源更新。'}"]), ""]
+
+          def source_health(data, limit=8):
+              stats = data.get("site_stats") or []
+              rows = []
+              for site in stats[:limit]:
+                  name = site.get("site_name") or site.get("site_id") or "unknown"
+                  count = site.get("count", 0)
+                  raw = site.get("raw_count", 0)
+                  rows.append(f"- {name}: 精选 `{count}` / 原始 `{raw}`")
+              return rows or ["- 暂无源健康数据。"]
 
           ai = load_json("data/latest-24h.json")
           all_mode = load_json("data/latest-24h-all.json")
 
+          authority_domains = [
+              "openai.com", "anthropic.com", "deepmind.google", "ai.googleblog.com",
+              "blog.google", "huggingface.co/blog", "github.blog", "nvidia.com",
+              "microsoft.com", "azure.microsoft.com", "meta.com", "ai.meta.com",
+              "arxiv.org", "paperswithcode.com"
+          ]
+          energy_keywords = [
+              "energy", "electricity", "ev", "electric vehicle", "charging",
+              "charger", "chargepoint", "battery", "storage", "solar", "inverter",
+              "smart meter", "home energy", "vpp", "virtual power plant",
+              "demand response", "grid", "der", "新能源", "充电", "充电桩",
+              "储能", "户储", "光伏", "逆变器", "虚拟电厂", "电网", "电价"
+          ]
+          competitor_keywords = [
+              "ecoflow", "anker", "solix", "octopus", "kraken", "tibber",
+              "sonnen", "tesla", "powerwall", "chargepoint", "wallbox",
+              "enphase", "solaredge", "ev.energy", "kaluza", "lunar energy",
+              "sunrun", "generac", "energyhub", "autogrid", "piclo", "leap",
+              "voltus", "abb e-mobility"
+          ]
+
           body = [
-              f"# Daily Radar - {today}",
+              f"# 每日雷达 - {today}",
               "",
-              "## Open",
-              f"- [AI News Radar]({pages_url})",
-              f"- [AI focused JSON]({pages_url}data/latest-24h.json)",
-              f"- [All-source JSON]({pages_url}data/latest-24h-all.json)",
+              "## 今日入口",
+              f"- [在线看板]({pages_url})",
+              f"- [AI 精选数据]({pages_url}data/latest-24h.json)",
+              f"- [全量数据]({pages_url}data/latest-24h-all.json)",
               "",
-              "## Snapshot",
-              f"- Generated at: `{ai.get('generated_at', 'unknown')}`",
-              f"- AI focused items: `{ai.get('total_items', 0)}`",
-              f"- All-source items: `{all_mode.get('total_items', all_mode.get('total_items_all_mode', 0))}`",
-              f"- Source count: `{ai.get('source_count', 0)}`",
+              "## 今日概览",
+              f"- 生成时间: `{ai.get('generated_at', 'unknown')}`",
+              f"- AI 精选: `{ai.get('total_items', 0)}` 条",
+              f"- 全量池: `{all_mode.get('total_items', all_mode.get('total_items_all_mode', 0))}` 条",
+              f"- 信息源数量: `{ai.get('source_count', 0)}`",
               "",
-              "## Top AI Items",
-              *top_items(ai, 10),
+              *section_domain_items(
+                  ai,
+                  "AI 权威资讯日报",
+                  domains=authority_domains,
+                  limit=10,
+                  empty="今日 OpenAI、Anthropic、Google DeepMind、Hugging Face、GitHub、NVIDIA、Microsoft、Meta、arXiv 等官方/权威源没有命中更新；请查看下方 AI 行业热点。"
+              ),
+              *section_items(
+                  ai,
+                  "AI 行业热点",
+                  limit=10,
+              ),
+              *section_items(
+                  all_mode,
+                  "家庭能源 / 新能源汽车 / 充电桩日报",
+                  keywords=energy_keywords,
+                  limit=10,
+                  empty="当前仓库还没有接入能源、EV、充电桩专用 OPML/源，因此今日没有形成可用行业日报。下一步需要接入 IEA、DOE、EAFO、InsideEVs、Charged EVs、Utility Dive、pv magazine、CnEVPost、盖世汽车等源。"
+              ),
+              *section_items(
+                  all_mode,
+                  "竞品与 VPP 监控",
+                  keywords=competitor_keywords,
+                  limit=10,
+                  empty="今日没有命中 EcoFlow、Anker SOLIX、Octopus、Tibber、ChargePoint、Wallbox、Enphase、Tesla Energy、VPP/DERMS 等竞品或 VPP 关键词。需要接入这些公司的官方新闻页、IR RSS 或博客源。"
+              ),
+              "## 信息源健康",
+              *source_health(ai, 10),
               "",
-              "## Daily Report Placeholders",
-              "- Energy / EV / charging report: add the generated Markdown link here after the two-report pipeline is enabled.",
-              "- AI authority report: add the generated Markdown link here after the two-report pipeline is enabled.",
+              "## 待补齐",
+              "- 当前已经能提醒你查看 AI 雷达，但能源/EV/充电桩日报还缺专用信息源。",
+              "- 下一步应添加两套源配置：`energy-ev-charging.opml` 和 `ai-authority.opml`，再把两份日报拆成独立 Markdown 输出。",
               "",
               "<!-- daily-radar-reminder -->",
           ]
