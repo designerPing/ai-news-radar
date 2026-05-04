@@ -1,0 +1,95 @@
+name: Daily Radar Reminder
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 08:35 Asia/Shanghai. The data workflow runs every 30 minutes, so this
+    # waits a few minutes for the 08:30 snapshot to be committed.
+    - cron: "35 0 * * *"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  remind:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build issue body
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone, timedelta
+          from pathlib import Path
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          owner, name = repo.split("/", 1)
+          today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+          pages_url = f"https://{owner}.github.io/{name}/"
+
+          def load_json(path):
+              p = Path(path)
+              if not p.exists():
+                  return {}
+              return json.loads(p.read_text(encoding="utf-8"))
+
+          def top_items(data, limit=10):
+              rows = []
+              for item in data.get("items", [])[:limit]:
+                  title = item.get("title_zh") or item.get("title") or "Untitled"
+                  url = item.get("url") or ""
+                  source = item.get("source") or item.get("site_name") or "unknown"
+                  if url:
+                      rows.append(f"- [{title}]({url}) - {source}")
+                  else:
+                      rows.append(f"- {title} - {source}")
+              return rows or ["- No items found in the latest snapshot."]
+
+          ai = load_json("data/latest-24h.json")
+          all_mode = load_json("data/latest-24h-all.json")
+
+          body = [
+              f"# Daily Radar - {today}",
+              "",
+              "## Open",
+              f"- [AI News Radar]({pages_url})",
+              f"- [AI focused JSON]({pages_url}data/latest-24h.json)",
+              f"- [All-source JSON]({pages_url}data/latest-24h-all.json)",
+              "",
+              "## Snapshot",
+              f"- Generated at: `{ai.get('generated_at', 'unknown')}`",
+              f"- AI focused items: `{ai.get('total_items', 0)}`",
+              f"- All-source items: `{all_mode.get('total_items', all_mode.get('total_items_all_mode', 0))}`",
+              f"- Source count: `{ai.get('source_count', 0)}`",
+              "",
+              "## Top AI Items",
+              *top_items(ai, 10),
+              "",
+              "## Daily Report Placeholders",
+              "- Energy / EV / charging report: add the generated Markdown link here after the two-report pipeline is enabled.",
+              "- AI authority report: add the generated Markdown link here after the two-report pipeline is enabled.",
+              "",
+              "<!-- daily-radar-reminder -->",
+          ]
+
+          Path("daily-radar-issue.md").write_text("\n".join(body) + "\n", encoding="utf-8")
+          Path("daily-radar-title.txt").write_text(f"Daily Radar - {today}\n", encoding="utf-8")
+          PY
+
+      - name: Create or update issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="$(cat daily-radar-title.txt)"
+          issue_number="$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$issue_number" ]; then
+            gh issue edit "$issue_number" --body-file daily-radar-issue.md
+            echo "Updated issue #$issue_number"
+          else
+            gh issue create --title "$title" --body-file daily-radar-issue.md
+          fi
